@@ -2,7 +2,7 @@
 import { useEffect, useState } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { useNavigate } from 'react-router-dom';
-import { api } from '../../api'; // Import api
+import { api } from '../api'; // CORRECTED PATH: Was ../../api
 
 export default function SavedJournals() {
   const { user } = useAuth();
