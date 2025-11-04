@@ -1,124 +1,116 @@
 import { useEffect, useMemo, useState } from 'react'
 import { useAuth } from '../context/AuthContext'
+import { api } from '../api' // Import the api helper
 
+// Helper to generate unique IDs
 function uid(){
   return 'mm-'+Date.now().toString(36)+'-'+Math.random().toString(36).slice(2,8)
-}
-
-function empathyBot(text){
-  const t = text.toLowerCase()
-  if(/\b(sad|lonely|upset|down|depressed)\b/.test(t))
-    return "I'm sorry you're feeling this way. Do you want to share what triggered it today? I'm listening."
-  if(/\b(happy|great|excited|proud|joy)\b/.test(t))
-    return "That's wonderful! What happened that made you feel this way? Capture a few details so you can revisit this moment."
-  if(/\b(angry|mad|frustrated|annoyed)\b/.test(t))
-    return "Anger is a signal. What boundary felt crossed? A short walk and slow breathing can help before responding."
-  if(/\b(tired|exhausted|sleepy|burnt)\b/.test(t))
-    return "Sounds like you need rest. One tiny action: 2 minutes of deep breathing or a glass of water."
-  return "Tell me more. What happened, how did it make you feel, and what do you need right now?"
 }
 
 export default function Journal(){
   const { user } = useAuth()
   const userId = user?.id || 'guest'
+  const [loading, setLoading] = useState(false) // For AI responses
+  const [pageLoading, setPageLoading] = useState(true) // For loading the chat history
 
   const [journalId, setJournalId] = useState(()=>{
+    // Get the last-opened journal ID from local storage
     return localStorage.getItem('mm_current_journal_id') || uid()
   })
-
-  const CHAT_KEY = useMemo(
-    ()=>`mm_chat_${userId}_${journalId}`,
-    [userId,journalId]
-  )
-  const INDEX_KEY = `mm_chats_index_${userId}`
 
   const [title, setTitle] = useState('Untitled Journal')
   const [messages, setMessages] = useState([])
   const [input, setInput] = useState('')
 
-  // load from storage
+  // Load chat history from backend when component loads or journalId changes
   useEffect(()=>{
-    const raw = localStorage.getItem(CHAT_KEY)
-    if(raw){
-      const obj = JSON.parse(raw)
-      setTitle(obj.title || 'Untitled Journal')
-      setMessages(obj.messages || [])
-    } else {
-      const seed = [{
-        id: uid(),
-        from:'system',
-        text:"Hi, I'm your MoodMate counselor 🙂. What's on your mind today?",
-        at: new Date().toISOString()
-      }]
-      setMessages(seed)
-      save(seed, title)
+    if (userId === 'guest') {
+      setPageLoading(false)
+      return; // Don't load for guest
     }
+    
+    setPageLoading(true)
+    // Keep local storage updated with the current ID
     localStorage.setItem('mm_current_journal_id', journalId)
+    
+    api.get(`/journal/session/${journalId}`).then(data => {
+      if (data.error || !data.messages) {
+        // Journal doesn't exist on backend yet, create a new one
+        const seed = [{
+          id: uid(),
+          from:'system',
+          text:"Hi, I'm your MoodMate counselor 🙂. What's on your mind today?",
+          at: new Date().toISOString()
+        }]
+        setMessages(seed)
+        setTitle('Untitled Journal')
+        save(seed, 'Untitled Journal') // Save the new seed to backend
+      } else {
+        // Journal loaded successfully
+        setTitle(data.title)
+        setMessages(data.messages)
+      }
+      setPageLoading(false)
+    })
     // eslint-disable-next-line
-  }, [CHAT_KEY])
+  }, [journalId, userId]) // Re-run if journalId or user changes
 
-  function save(msgs, t){
-    localStorage.setItem(
-      CHAT_KEY,
-      JSON.stringify({ journalId, userId, title: t, messages: msgs })
-    )
-    // update user index of journals
-    const idxRaw = localStorage.getItem(INDEX_KEY)
-    const idx = idxRaw ? JSON.parse(idxRaw) : []
-    const existing = idx.find(i=>i.journalId===journalId)
-    const item = {
-      journalId,
+  // Save chat history to backend
+  async function save(msgs, t){
+    if (userId === 'guest') return; // Don't save for guest
+    
+    // We can "fire and forget" this, no need to await
+    api.post('/journal', {
+      journal_id: journalId,
+      user_id: userId,
       title: t,
-      updatedAt: new Date().toISOString(),
-      count: msgs.length
-    }
-    if(existing){
-      Object.assign(existing, item)
-    } else {
-      idx.unshift(item)
-    }
-    localStorage.setItem(INDEX_KEY, JSON.stringify(idx.slice(0,200)))
+      messages: JSON.stringify(msgs) // Send messages as JSON string
+    })
   }
 
-  function send(){
+  // Send a message
+  async function send(){
     const text = input.trim()
-    if(!text) return
+    if(!text || loading || pageLoading) return
+    
+    setLoading(true) // Start loading for AI response
     const now = new Date().toISOString()
-
     const me = { id: uid(), from:'me', text, at: now }
+    
+    // Show user's message immediately
+    const nextWithMe = [...messages, me]
+    setMessages(nextWithMe)
+    setInput('')
+
+    // 1. Get AI response from backend
+    const aiData = await api.post('/ai-chat', { message: text })
+    
     const ai = {
       id: uid(),
       from:'ai',
-      text: empathyBot(text),
+      text: aiData.response || "I'm not sure what to say. Can you tell me more?",
       at: new Date().toISOString()
     }
 
-    const next = [...messages, me, ai]
-    setMessages(next)
-    setInput('')
-    save(next, title)
-
-    // TODO: POST /ai-chat { user_id: userId, message: text } and merge real response
+    const nextWithAi = [...nextWithMe, ai]
+    setMessages(nextWithAi)
+    
+    // 2. Save the full new history to backend
+    await save(nextWithAi, title)
+    setLoading(false) // Stop loading
   }
 
+  // Start a new journal
   function newJournal(){
     const id = uid()
-    setJournalId(id)
-    localStorage.setItem('mm_current_journal_id', id)
-    const seed = [{
-      id: uid(),
-      from:'system',
-      text:"New journal started. What's on your mind?",      at: new Date().toISOString()
-    }]
-    setMessages(seed)
-    setTitle('Untitled Journal')
-    save(seed, 'Untitled Journal')
+    setJournalId(id) // This will trigger the useEffect to load/create the new journal
   }
 
-  function rename(){
+  // Rename the current journal
+  async function rename(){
     const t = prompt('Rename journal to:', title) || title
     setTitle(t)
-    save(messages, t)
+    await save(messages, t) // Save the new title to the backend
   }
 
   return (
@@ -131,7 +123,7 @@ export default function Journal(){
               User ID: <code>{userId}</code>
             </span>
             <span className="badge">
-              Journal ID: <code>{journalId}</code>
+              Journal ID: <code>{journalId.slice(0, 10)}...</code>
             </span>
             <button className="btn-outline" onClick={rename}>Rename</button>
             <button className="btn" onClick={newJournal}>New Journal</button>
@@ -143,31 +135,41 @@ export default function Journal(){
         </div>
 
         <div className="h-80 overflow-y-auto rounded-xl border border-slate-200 p-3 bg-white mt-3">
-          {messages.map(m=>(
-            <div key={m.id} className={`my-2 flex ${m.from==='me'?'justify-end':'justify-start'}`}>
-              <div className={`bubble ${m.from==='me'?'bubble-me':'bubble-ai'}`}>
-                {m.from==='system' && <strong>System: </strong>}{m.text}
-                <div className="text-[10px] opacity-70 mt-1">
-                  {new Date(m.at).toLocaleString()}
+          {pageLoading ? (
+            <p>Loading journal...</p>
+          ) : (
+            messages.map(m=>(
+              <div key={m.id} className={`my-2 flex ${m.from==='me'?'justify-end':'justify-start'}`}>
+                <div className={`bubble ${m.from==='me'?'bubble-me':'bubble-ai'}`}>
+                  {m.from==='system' && <strong>System: </strong>}{m.text}
+                  <div className="text-[10px] opacity-70 mt-1">
+                    {new Date(m.at).toLocaleString()}
+                  </div>
                 </div>
               </div>
-            </div>
-          ))}
+            ))
+          )}
         </div>
 
+        {/* This is the corrected section. 
+          The <input> and <button> are inside their parent <div> 
+        */}
         <div className="mt-3 flex gap-2">
           <input
             className="input"
             value={input}
             onChange={e=>setInput(e.target.value)}
-            placeholder="Type what’s on your mind…"
+            placeholder={loading ? "Thinking..." : "Type what’s on your mind…"}
             onKeyDown={e=>e.key==='Enter' && send()}
+            disabled={loading || pageLoading}
           />
-          <button className="btn" onClick={send}>Send</button>
+          <button className="btn" onClick={send} disabled={loading || pageLoading}>
+            {loading ? "..." : "Send"}
+          </button>
         </div>
 
         <p className="text-xs text-slate-500 mt-2">
-          Frontend-only. Connect to backend: <code>POST /ai-chat</code>, <code>GET /ai-chat/&lt;user_id&gt;</code>
+          Your journal is now saved to your account.
         </p>
       </div>
     </div>

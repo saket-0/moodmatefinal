@@ -1,6 +1,6 @@
 // src/pages/MoodEntry.jsx
 import { useState } from 'react';
-import { useAuth } from '../context/AuthContext'; // Import useAuth
+import { useAuth } from '../../context/AuthContext'; // Import useAuth
 import { api } from '../../api'; // Import api
 
 // ... (moods, keywords, detectFromText functions remain the same)
